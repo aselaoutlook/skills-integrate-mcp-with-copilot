@@ -11,6 +11,9 @@ from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
 
+from sqlalchemy import Column, ForeignKey, Integer, String, create_engine, select
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
 
@@ -19,8 +22,41 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# SQLite-backed activity database
+Base = declarative_base()
+database_path = current_dir / "activities.db"
+engine = create_engine(
+    f"sqlite:///{database_path}", connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+class Activity(Base):
+    __tablename__ = "activities"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+    description = Column(String, nullable=False)
+    schedule = Column(String, nullable=False)
+    max_participants = Column(Integer, nullable=False)
+    participants = relationship(
+        "Participant",
+        back_populates="activity",
+        cascade="all, delete-orphan",
+        order_by="Participant.id",
+    )
+
+
+class Participant(Base):
+    __tablename__ = "participants"
+
+    id = Column(Integer, primary_key=True)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=False)
+    email = Column(String, nullable=False)
+    activity = relationship("Activity", back_populates="participants")
+
+
+INITIAL_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -78,6 +114,42 @@ activities = {
 }
 
 
+def serialize_activity(activity: Activity):
+    return {
+        "description": activity.description,
+        "schedule": activity.schedule,
+        "max_participants": activity.max_participants,
+        "participants": [participant.email for participant in activity.participants],
+    }
+
+
+def initialize_database():
+    Base.metadata.create_all(bind=engine)
+
+    with SessionLocal() as session:
+        if session.execute(select(Activity.id)).first():
+            return
+
+        for name, details in INITIAL_ACTIVITIES.items():
+            activity = Activity(
+                name=name,
+                description=details["description"],
+                schedule=details["schedule"],
+                max_participants=details["max_participants"],
+            )
+            activity.participants = [
+                Participant(email=email) for email in details["participants"]
+            ]
+            session.add(activity)
+
+        session.commit()
+
+
+@app.on_event("startup")
+def startup_event():
+    initialize_database()
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
@@ -85,48 +157,64 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    with SessionLocal() as session:
+        activities = session.execute(select(Activity).order_by(Activity.name)).scalars()
+        return {
+            activity.name: serialize_activity(activity)
+            for activity in activities
+        }
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    with SessionLocal() as session:
+        activity = session.execute(
+            select(Activity).where(Activity.name == activity_name)
+        ).scalar_one_or_none()
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        if activity is None:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is already signed up"
-        )
+        if any(participant.email == email for participant in activity.participants):
+            raise HTTPException(
+                status_code=400,
+                detail="Student is already signed up"
+            )
 
-    # Add student
-    activity["participants"].append(email)
+        activity.participants.append(Participant(email=email))
+        session.commit()
+
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    with SessionLocal() as session:
+        activity = session.execute(
+            select(Activity).where(Activity.name == activity_name)
+        ).scalar_one_or_none()
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        if activity is None:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Validate student is signed up
-    if email not in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is not signed up for this activity"
+        participant = next(
+            (
+                registered_participant
+                for registered_participant in activity.participants
+                if registered_participant.email == email
+            ),
+            None,
         )
 
-    # Remove student
-    activity["participants"].remove(email)
+        if participant is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is not signed up for this activity"
+            )
+
+        session.delete(participant)
+        session.commit()
+
     return {"message": f"Unregistered {email} from {activity_name}"}

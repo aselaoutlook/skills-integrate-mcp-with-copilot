@@ -6,13 +6,14 @@ A super simple FastAPI application that allows students to view and sign up for 
 
 - View all available extracurricular activities
 - Sign up for activities
+- Persist activities and signups in a SQLite database
 
 ## Getting Started
 
 1. Install the dependencies:
 
    ```
-   pip install fastapi uvicorn
+   pip install fastapi uvicorn sqlalchemy
    ```
 
 2. Run the application:
@@ -34,7 +35,7 @@ A super simple FastAPI application that allows students to view and sign up for 
 
 ## Data Model
 
-The application uses a simple data model with meaningful identifiers:
+The application uses a SQLite-backed data model with meaningful identifiers:
 
 1. **Activities** - Uses activity name as identifier:
 
@@ -47,4 +48,4 @@ The application uses a simple data model with meaningful identifiers:
    - Name
    - Grade level
 
-All data is stored in memory, which means data will be reset when the server restarts.
+Activities and registrations are stored in `src/activities.db`, so data persists when the server restarts.
